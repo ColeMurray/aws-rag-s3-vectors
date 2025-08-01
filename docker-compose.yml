@@ -1,0 +1,128 @@
+# AWS S3 Vectors RAG - Local Development with Observability
+# This configuration includes the full stack for local development
+# Usage: docker-compose up
+
+version: '3.8'
+
+services:
+  # RAG API Service
+  rag-api:
+    build: .
+    container_name: rag-api
+    ports:
+      - "8000:8000"
+    environment:
+      # AWS Configuration
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      
+      # S3 Vectors Configuration
+      - S3_VECTOR_BUCKET_NAME=${S3_VECTOR_BUCKET_NAME}
+      - S3_VECTOR_INDEX_NAME=${S3_VECTOR_INDEX_NAME:-rag-index}
+      - S3_VECTOR_DIMENSION=${S3_VECTOR_DIMENSION:-1024}
+      - S3_VECTOR_DISTANCE_METRIC=${S3_VECTOR_DISTANCE_METRIC:-cosine}
+      
+      # Bedrock Model Configuration
+      - BEDROCK_EMBED_MODEL_ID=${BEDROCK_EMBED_MODEL_ID:-amazon.titan-embed-text-v2:0}
+      - BEDROCK_LLM_MODEL_ID=${BEDROCK_LLM_MODEL_ID:-us.anthropic.claude-3-5-haiku-20241022-v1:0}
+      
+      # Application Configuration
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PYTHONPATH=/app
+      - RELOAD=true  # Enable auto-reload for development
+      
+      # OpenTelemetry Configuration
+      - OTEL_ENABLED=${OTEL_ENABLED:-true}
+      - OTEL_SERVICE_NAME=s3-vectors-rag
+      - OTEL_ENVIRONMENT=development
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_EXPORTER_OTLP_INSECURE=true
+      - OTEL_CAPTURE_CONTENT=${OTEL_CAPTURE_CONTENT:-false}
+      - OTEL_CAPTURE_SOURCES=${OTEL_CAPTURE_SOURCES:-true}
+      - OTEL_MAX_SOURCES_PER_TRACE=${OTEL_MAX_SOURCES_PER_TRACE:-10}
+    env_file:
+      - .env
+    volumes:
+      - ./src:/app/src  # Mount source code for hot-reload
+      - ./data:/app/data
+      - ./logs:/app/logs
+    command: uvicorn src.app:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      - otel-collector
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    networks:
+      - rag-network
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.98.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC receiver
+      - "4318:4318"   # OTLP HTTP receiver
+      - "8888:8888"   # Prometheus metrics
+      - "8889:8889"   # Prometheus exporter metrics
+      - "13133:13133" # Health check
+      - "55679:55679" # ZPages
+    networks:
+      - rag-network
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.56
+    container_name: jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14250:14250" # gRPC
+    networks:
+      - rag-network
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - rag-network
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
